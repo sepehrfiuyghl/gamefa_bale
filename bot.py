@@ -3,6 +3,7 @@ import re
 import time
 import logging
 import tempfile
+from io import BytesIO
 from html import unescape
 from urllib.parse import urlparse, urljoin
 
@@ -32,12 +33,15 @@ ADMIN_IDS = {
 }
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
-IMAGE_TIMEOUT = int(os.getenv("IMAGE_TIMEOUT", "60"))
-
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "10"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY", "15"))
 
 FOOTER = "@Gamefa_official"
+
+DOWNLOAD_DIR = os.getenv(
+    "DOWNLOAD_DIR",
+    "/tmp/gamefa_images"
+)
 
 MAX_IMAGE_SIZE = 15 * 1024 * 1024
 
@@ -55,13 +59,23 @@ logger = logging.getLogger("gamefa-bale-bot")
 
 
 # ============================================================
-# TOKEN VALIDATION
+# VALIDATE TOKEN
 # ============================================================
 
 if not BALE_TOKEN:
     raise RuntimeError(
         "BALE_TOKEN در متغیرهای محیطی Railway یا فایل .env تنظیم نشده است."
     )
+
+
+# ============================================================
+# CREATE DOWNLOAD DIRECTORY
+# ============================================================
+
+os.makedirs(
+    DOWNLOAD_DIR,
+    exist_ok=True
+)
 
 
 # ============================================================
@@ -78,10 +92,13 @@ session.headers.update({
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;"
+        "q=0.8"
     ),
-    "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://gamefa.com/",
+    "Accept-Language": (
+        "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7"
+    ),
+    "Connection": "keep-alive",
 })
 
 
@@ -90,8 +107,10 @@ session.headers.update({
 # ============================================================
 
 def is_admin(user_id):
+
     try:
         return int(user_id) in ADMIN_IDS
+
     except Exception:
         return False
 
@@ -101,42 +120,59 @@ def is_admin(user_id):
 # ============================================================
 
 def clean_text(text):
+
     if not text:
         return ""
 
-    text = unescape(str(text))
-    text = text.replace("\xa0", " ")
-    text = text.replace("\u200c", "\u200c")
+    text = unescape(text)
 
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.replace(
+        "\xa0",
+        " "
+    )
 
-    return text.strip()
+    text = text.strip()
+
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\n{3,}",
+        "\n\n",
+        text
+    )
+
+    return text
 
 
 # ============================================================
-# URL HELPERS
+# URL NORMALIZATION
 # ============================================================
 
-def normalize_url(url, base_url=None):
+def normalize_url(url):
+
     if not url:
         return ""
 
-    url = str(url).strip().strip("<>\"'")
+    url = url.strip().strip("<>")
 
-    if url.startswith("//"):
-        url = "https:" + url
-
-    elif base_url and not url.startswith(("http://", "https://")):
-        url = urljoin(base_url, url)
-
-    elif not url.startswith(("http://", "https://")):
+    if not url.startswith(
+        ("http://", "https://")
+    ):
         url = "https://" + url
 
     return url
 
 
+# ============================================================
+# EXTRACT URL
+# ============================================================
+
 def extract_url(text):
+
     if not text:
         return None
 
@@ -147,6 +183,7 @@ def extract_url(text):
     )
 
     if match:
+
         url = match.group(0)
 
         url = url.rstrip(
@@ -162,6 +199,7 @@ def extract_url(text):
     )
 
     if match:
+
         url = match.group(0)
 
         url = url.rstrip(
@@ -173,8 +211,14 @@ def extract_url(text):
     return None
 
 
+# ============================================================
+# GAMEFA URL CHECK
+# ============================================================
+
 def is_gamefa_url(url):
+
     try:
+
         parsed = urlparse(url)
 
         host = parsed.netloc.lower()
@@ -188,6 +232,7 @@ def is_gamefa_url(url):
         )
 
     except Exception:
+
         return False
 
 
@@ -196,7 +241,6 @@ def is_gamefa_url(url):
 # ============================================================
 
 def fetch_soup(url):
-    logger.info("Downloading article: %s", url)
 
     response = session.get(
         url,
@@ -207,12 +251,10 @@ def fetch_soup(url):
     response.raise_for_status()
 
     if response.apparent_encoding:
-        response.encoding = response.apparent_encoding
 
-    logger.info(
-        "Article downloaded successfully. Status=%s",
-        response.status_code
-    )
+        response.encoding = (
+            response.apparent_encoding
+        )
 
     return BeautifulSoup(
         response.text,
@@ -221,7 +263,7 @@ def fetch_soup(url):
 
 
 # ============================================================
-# TITLE
+# EXTRACT TITLE
 # ============================================================
 
 def extract_title(soup):
@@ -236,7 +278,9 @@ def extract_title(soup):
 
     for selector in selectors:
 
-        element = soup.select_one(selector)
+        element = soup.select_one(
+            selector
+        )
 
         if element:
 
@@ -258,20 +302,9 @@ def extract_title(soup):
     if meta:
 
         title = clean_text(
-            meta.get("content", "")
-        )
-
-        if title:
-            return title
-
-    title_tag = soup.find("title")
-
-    if title_tag:
-
-        title = clean_text(
-            title_tag.get_text(
-                " ",
-                strip=True
+            meta.get(
+                "content",
+                ""
             )
         )
 
@@ -282,449 +315,257 @@ def extract_title(soup):
 
 
 # ============================================================
-# IMAGE URL EXTRACTION
+# IMAGE URL NORMALIZER
 # ============================================================
 
-def get_srcset_best_url(srcset):
-    """
-    از srcset بهترین/بزرگ‌ترین تصویر را انتخاب می‌کند.
-    """
+def normalize_image_url(
+    image_url,
+    article_url
+):
 
-    if not srcset:
+    if not image_url:
         return None
 
-    candidates = []
+    image_url = image_url.strip()
 
-    for item in srcset.split(","):
-
-        item = item.strip()
-
-        if not item:
-            continue
-
-        parts = item.split()
-
-        image_url = parts[0]
-
-        score = 0
-
-        if len(parts) > 1:
-
-            descriptor = parts[1]
-
-            match = re.match(
-                r"(\d+)w",
-                descriptor
-            )
-
-            if match:
-                score = int(match.group(1))
-
-            else:
-
-                match = re.match(
-                    r"([\d.]+)x",
-                    descriptor
-                )
-
-                if match:
-                    score = int(
-                        float(match.group(1)) * 1000
-                    )
-
-        candidates.append(
-            (score, image_url)
-        )
-
-    if not candidates:
-        return None
-
-    candidates.sort(
-        key=lambda x: x[0],
-        reverse=True
+    image_url = image_url.replace(
+        "&amp;",
+        "&"
     )
 
-    return candidates[0][1]
+    if image_url.startswith(
+        "//"
+    ):
+
+        image_url = (
+            "https:" + image_url
+        )
+
+    elif image_url.startswith(
+        "/"
+    ):
+
+        image_url = urljoin(
+            article_url,
+            image_url
+        )
+
+    elif not image_url.startswith(
+        ("http://", "https://")
+    ):
+
+        image_url = urljoin(
+            article_url,
+            image_url
+        )
+
+    return image_url
 
 
-def extract_image(soup, page_url):
+# ============================================================
+# EXTRACT IMAGE URL
+# ============================================================
+
+def extract_image(
+    soup,
+    article_url
+):
 
     # --------------------------------------------------------
     # 1. OpenGraph
     # --------------------------------------------------------
 
-    meta = soup.find(
+    og_image = soup.find(
         "meta",
         property="og:image"
     )
 
-    if meta:
+    if og_image:
 
-        image = meta.get("content")
+        image = og_image.get(
+            "content"
+        )
 
         if image:
-            image = normalize_url(
+
+            return normalize_image_url(
                 image,
-                page_url
+                article_url
             )
 
-            if image:
-                logger.info(
-                    "Image found from og:image: %s",
-                    image
-                )
-
-                return image
-
     # --------------------------------------------------------
-    # 2. Twitter
+    # 2. og:image:url
     # --------------------------------------------------------
 
-    meta = soup.find(
+    og_image_url = soup.find(
+        "meta",
+        property="og:image:url"
+    )
+
+    if og_image_url:
+
+        image = og_image_url.get(
+            "content"
+        )
+
+        if image:
+
+            return normalize_image_url(
+                image,
+                article_url
+            )
+
+    # --------------------------------------------------------
+    # 3. Twitter image
+    # --------------------------------------------------------
+
+    twitter = soup.find(
         "meta",
         attrs={
             "name": "twitter:image"
         }
     )
 
-    if meta:
+    if twitter:
 
-        image = meta.get("content")
+        image = twitter.get(
+            "content"
+        )
 
         if image:
 
-            image = normalize_url(
+            return normalize_image_url(
                 image,
-                page_url
+                article_url
             )
 
-            if image:
-                logger.info(
-                    "Image found from twitter:image: %s",
-                    image
-                )
+    # --------------------------------------------------------
+    # 4. Twitter image src
+    # --------------------------------------------------------
 
-                return image
+    twitter2 = soup.find(
+        "meta",
+        attrs={
+            "property": "twitter:image"
+        }
+    )
+
+    if twitter2:
+
+        image = twitter2.get(
+            "content"
+        )
+
+        if image:
+
+            return normalize_image_url(
+                image,
+                article_url
+            )
 
     # --------------------------------------------------------
-    # 3. Article images
+    # 5. Article images
     # --------------------------------------------------------
 
     selectors = [
+
         "article img",
+
         ".entry-content img",
+
         ".post-content img",
+
         ".article-content img",
+
         ".single-content img",
+
         ".td-post-content img",
+
+        ".content-area img",
+
         "main img",
+
     ]
 
     for selector in selectors:
 
-        images = soup.select(selector)
+        images = soup.select(
+            selector
+        )
 
-        for image_tag in images:
+        for image in images:
 
-            srcset = (
-                image_tag.get("srcset")
-                or image_tag.get("data-srcset")
-                or image_tag.get("data-lazy-srcset")
+            candidates = [
+
+                image.get("src"),
+
+                image.get("data-src"),
+
+                image.get("data-lazy-src"),
+
+                image.get("data-original"),
+
+                image.get("data-image"),
+
+                image.get("data-url"),
+
+            ]
+
+            # srcset
+            srcset = image.get(
+                "srcset"
             )
 
-            image = get_srcset_best_url(
-                srcset
-            )
+            if srcset:
 
-            if not image:
+                parts = srcset.split(",")
 
-                possible_attributes = [
-                    "data-lazy-src",
-                    "data-src",
-                    "data-original",
-                    "data-url",
-                    "src",
-                ]
+                for part in parts:
 
-                for attribute in possible_attributes:
+                    part = part.strip()
 
-                    value = image_tag.get(
-                        attribute
-                    )
+                    if part:
 
-                    if value:
-                        image = value
-                        break
+                        candidates.append(
+                            part.split()[0]
+                        )
 
-            if image:
+            for candidate in candidates:
 
-                image = normalize_url(
-                    image,
-                    page_url
-                )
-
-                if image:
-
-                    logger.info(
-                        "Image found from article: %s",
-                        image
-                    )
-
-                    return image
-
-    logger.warning(
-        "No image URL found."
-    )
-
-    return None
-
-
-# ============================================================
-# DOWNLOAD IMAGE
-# ============================================================
-
-def download_image(image_url, page_url):
-    """
-    تصویر را از Gamefa دانلود می‌کند
-    و مسیر فایل موقت را برمی‌گرداند.
-    """
-
-    if not image_url:
-        return None
-
-    image_url = normalize_url(
-        image_url,
-        page_url
-    )
-
-    logger.info(
-        "Downloading image: %s",
-        image_url
-    )
-
-    image_headers = {
-        "User-Agent": session.headers["User-Agent"],
-        "Accept": (
-            "image/avif,image/webp,image/apng,"
-            "image/svg+xml,image/*,*/*;q=0.8"
-        ),
-        "Referer": page_url,
-    }
-
-    temp_path = None
-
-    try:
-
-        response = session.get(
-            image_url,
-            headers=image_headers,
-            timeout=IMAGE_TIMEOUT,
-            stream=True,
-            allow_redirects=True
-        )
-
-        response.raise_for_status()
-
-        content_type = (
-            response.headers
-            .get("Content-Type", "")
-            .lower()
-        )
-
-        logger.info(
-            "Image response: status=%s content-type=%s",
-            response.status_code,
-            content_type
-        )
-
-        # ----------------------------------------------------
-        # بررسی نوع فایل
-        # ----------------------------------------------------
-
-        allowed_types = (
-            "image/jpeg",
-            "image/jpg",
-            "image/png",
-            "image/webp",
-            "image/gif",
-            "image/bmp",
-            "image/avif",
-        )
-
-        # بعضی سرورها Content-Type اشتباه می‌فرستند.
-        # در این حالت همچنان فایل را دانلود می‌کنیم.
-        if (
-            content_type
-            and not content_type.startswith("image/")
-            and "octet-stream" not in content_type
-        ):
-
-            logger.warning(
-                "URL does not look like an image: %s",
-                content_type
-            )
-
-        # ----------------------------------------------------
-        # حجم فایل
-        # ----------------------------------------------------
-
-        content_length = response.headers.get(
-            "Content-Length"
-        )
-
-        if content_length:
-
-            try:
-
-                content_length = int(
-                    content_length
-                )
-
-                if content_length > MAX_IMAGE_SIZE:
-
-                    logger.warning(
-                        "Image too large: %s bytes",
-                        content_length
-                    )
-
-                    return None
-
-            except ValueError:
-                pass
-
-        # ----------------------------------------------------
-        # تعیین پسوند
-        # ----------------------------------------------------
-
-        extension = ".jpg"
-
-        if "png" in content_type:
-            extension = ".png"
-
-        elif "webp" in content_type:
-            extension = ".webp"
-
-        elif "gif" in content_type:
-            extension = ".gif"
-
-        elif "bmp" in content_type:
-            extension = ".bmp"
-
-        elif "avif" in content_type:
-            extension = ".avif"
-
-        else:
-
-            path = urlparse(
-                response.url
-            ).path.lower()
-
-            for ext in (
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".webp",
-                ".gif",
-                ".bmp",
-                ".avif",
-            ):
-
-                if path.endswith(ext):
-
-                    extension = ext
-                    break
-
-        # ----------------------------------------------------
-        # ساخت فایل موقت
-        # ----------------------------------------------------
-
-        fd, temp_path = tempfile.mkstemp(
-            suffix=extension
-        )
-
-        os.close(fd)
-
-        total_size = 0
-
-        with open(
-            temp_path,
-            "wb"
-        ) as file:
-
-            for chunk in response.iter_content(
-                chunk_size=64 * 1024
-            ):
-
-                if not chunk:
+                if not candidate:
                     continue
 
-                total_size += len(chunk)
+                candidate = normalize_image_url(
+                    candidate,
+                    article_url
+                )
 
-                if total_size > MAX_IMAGE_SIZE:
+                if not candidate:
+                    continue
 
-                    logger.warning(
-                        "Image exceeded maximum size."
-                    )
+                # حذف تصاویر خیلی کوچک / آیکون‌ها
+                lower = candidate.lower()
 
-                    file.close()
+                bad_words = [
+                    "logo",
+                    "avatar",
+                    "icon",
+                    "favicon",
+                    "emoji",
+                    "gravatar",
+                    "loader",
+                    "loading",
+                ]
 
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
+                if any(
+                    word in lower
+                    for word in bad_words
+                ):
+                    continue
 
-                    return None
+                return candidate
 
-                file.write(chunk)
-
-        # ----------------------------------------------------
-        # بررسی اینکه فایل واقعاً خالی نباشد
-        # ----------------------------------------------------
-
-        if not os.path.exists(temp_path):
-
-            return None
-
-        file_size = os.path.getsize(
-            temp_path
-        )
-
-        if file_size < 100:
-
-            logger.warning(
-                "Downloaded image is too small."
-            )
-
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-
-            return None
-
-        logger.info(
-            "Image downloaded successfully: %s bytes -> %s",
-            file_size,
-            temp_path
-        )
-
-        return temp_path
-
-    except Exception as error:
-
-        logger.warning(
-            "Image download failed: %s",
-            error
-        )
-
-        if temp_path:
-
-            try:
-                os.remove(temp_path)
-            except Exception:
-                pass
-
-        return None
+    return None
 
 
 # ============================================================
@@ -734,19 +575,23 @@ def download_image(image_url, page_url):
 def remove_unwanted(container):
 
     selectors = [
+
         "script",
         "style",
         "noscript",
         "iframe",
         "svg",
+
         "form",
         "button",
+
         "nav",
         "footer",
         "header",
 
         ".advertisement",
         ".advertisement-container",
+
         ".ads",
         ".ad",
         ".banner",
@@ -756,16 +601,20 @@ def remove_unwanted(container):
 
         ".related-posts",
         ".related",
+
         ".comments",
         ".comment-section",
+
         ".author-box",
 
         ".post-meta",
         ".entry-meta",
+
         ".breadcrumb",
 
         ".sidebar",
         ".widget",
+
     ]
 
     for selector in selectors:
@@ -778,7 +627,7 @@ def remove_unwanted(container):
 
 
 # ============================================================
-# PARAGRAPH VALIDATION
+# VALID PARAGRAPH
 # ============================================================
 
 def valid_paragraph(text):
@@ -790,19 +639,25 @@ def valid_paragraph(text):
         return False
 
     unwanted = [
+
         "اشتراک‌گذاری",
         "اشتراک گذاری",
+
         "دیدگاه",
         "دیدگاه‌ها",
+
         "نظرات",
+
         "مطالب مرتبط",
+
         "تبلیغات",
+
         "عضویت",
+
         "دنبال کنید",
+
         "ادامه مطلب",
-        "بیشتر بخوانید",
-        "کپی لینک",
-        "منبع",
+
     ]
 
     for word in unwanted:
@@ -822,14 +677,23 @@ def extract_paragraphs(soup):
     best_paragraphs = []
 
     selectors = [
+
         "article",
+
         ".entry-content",
+
         ".post-content",
+
         ".article-content",
+
         ".single-content",
+
         ".td-post-content",
+
         ".content-area",
+
         "main",
+
     ]
 
     for selector in selectors:
@@ -845,11 +709,15 @@ def extract_paragraphs(soup):
                 "html.parser"
             )
 
-            remove_unwanted(copy)
+            remove_unwanted(
+                copy
+            )
 
             paragraphs = []
 
-            for paragraph in copy.find_all("p"):
+            for paragraph in copy.find_all(
+                "p"
+            ):
 
                 text = clean_text(
                     paragraph.get_text(
@@ -874,7 +742,9 @@ def extract_paragraphs(soup):
                 best_paragraphs
             ):
 
-                best_paragraphs = paragraphs
+                best_paragraphs = (
+                    paragraphs
+                )
 
     return best_paragraphs[:2]
 
@@ -888,44 +758,25 @@ def md_escape(text):
     if not text:
         return ""
 
-    # ترتیب مهم است
-    text = text.replace(
+    for character in [
         "\\",
-        "\\\\"
-    )
-
-    text = text.replace(
         "_",
-        "\\_"
-    )
-
-    text = text.replace(
         "*",
-        "\\*"
-    )
-
-    text = text.replace(
         "`",
-        "\\`"
-    )
-
-    # برای اینکه [عنوان] لینک خراب نشود،
-    # در عنوان فقط کاراکترهای مشکل‌ساز را کنترل می‌کنیم.
-    text = text.replace(
         "[",
-        "\\["
-    )
-
-    text = text.replace(
         "]",
-        "\\]"
-    )
+    ]:
+
+        text = text.replace(
+            character,
+            "\\" + character
+        )
 
     return text
 
 
 # ============================================================
-# BUILD NEWS CAPTION
+# BUILD CAPTION
 # ============================================================
 
 def build_caption(
@@ -946,21 +797,357 @@ def build_caption(
         paragraphs[1]
     )
 
-    lines = [
-        f"📢 *[{title}]({url})*",
-        "",
-        f"🟣 {paragraph_1}",
-        "",
-        f"🟣 {paragraph_2}",
-        "",
-        f"*[📑 ادامه خبر]({url})*",
-        "",
-        f"🆔 *{FOOTER}*",
-    ]
-
-    return "\n".join(
-        lines
+    return (
+        f"📢 *[{title}]({url})*\n\n"
+        f"🟣 {paragraph_1}\n\n"
+        f"🟣 {paragraph_2}\n\n"
+        f"*[📑 ادامه خبر]({url})*\n\n"
+        f"🆔 *{FOOTER}*"
     )
+
+
+# ============================================================
+# DOWNLOAD IMAGE
+# ============================================================
+
+def download_image(
+    image_url,
+    article_url
+):
+
+    if not image_url:
+        return None
+
+    logger.info(
+        "Downloading image: %s",
+        image_url
+    )
+
+    headers = {
+
+        "User-Agent": session.headers.get(
+            "User-Agent"
+        ),
+
+        "Referer": article_url,
+
+        "Accept": (
+            "image/avif,image/webp,"
+            "image/apng,image/svg+xml,"
+            "image/*,*/*;q=0.8"
+        ),
+
+    }
+
+    response = session.get(
+        image_url,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+        allow_redirects=True,
+        stream=True
+    )
+
+    response.raise_for_status()
+
+    content_type = (
+        response.headers.get(
+            "Content-Type",
+            ""
+        ).lower()
+    )
+
+    logger.info(
+        "Image HTTP status: %s",
+        response.status_code
+    )
+
+    logger.info(
+        "Image content type: %s",
+        content_type
+    )
+
+    # --------------------------------------------------------
+    # Read image safely
+    # --------------------------------------------------------
+
+    data = bytearray()
+
+    for chunk in response.iter_content(
+        chunk_size=64 * 1024
+    ):
+
+        if not chunk:
+            continue
+
+        data.extend(
+            chunk
+        )
+
+        if len(data) > MAX_IMAGE_SIZE:
+
+            raise ValueError(
+                "حجم تصویر بیشتر از "
+                f"{MAX_IMAGE_SIZE // (1024 * 1024)}MB است."
+            )
+
+    if not data:
+
+        raise ValueError(
+            "سرور گیمفا فایل تصویر خالی ارسال کرد."
+        )
+
+    raw = bytes(data)
+
+    # --------------------------------------------------------
+    # Validate content
+    # --------------------------------------------------------
+
+    if (
+        "text/html" in content_type
+        or "application/json" in content_type
+    ):
+
+        # بعضی CDNها Content-Type اشتباه می‌دهند
+        # بنابراین فقط در صورت HTML واقعی رد می‌کنیم.
+
+        beginning = raw[:500].lower()
+
+        if (
+            b"<html" in beginning
+            or b"<!doctype" in beginning
+        ):
+
+            raise ValueError(
+                "لینک تصویر به جای تصویر، "
+                "صفحه HTML برگرداند."
+            )
+
+    # --------------------------------------------------------
+    # Detect extension
+    # --------------------------------------------------------
+
+    extension = ".jpg"
+
+    if (
+        "png" in content_type
+    ):
+        extension = ".png"
+
+    elif (
+        "webp" in content_type
+    ):
+        extension = ".webp"
+
+    elif (
+        "gif" in content_type
+    ):
+        extension = ".gif"
+
+    elif (
+        "jpeg" in content_type
+        or "jpg" in content_type
+    ):
+        extension = ".jpg"
+
+    else:
+
+        path = urlparse(
+            image_url
+        ).path.lower()
+
+        if path.endswith(".png"):
+            extension = ".png"
+
+        elif path.endswith(".webp"):
+            extension = ".webp"
+
+        elif path.endswith(".gif"):
+            extension = ".gif"
+
+        elif path.endswith(
+            (".jpeg", ".jpg")
+        ):
+            extension = ".jpg"
+
+    # --------------------------------------------------------
+    # Save temporary image
+    # --------------------------------------------------------
+
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix="gamefa_",
+        suffix=extension,
+        dir=DOWNLOAD_DIR,
+        delete=False
+    )
+
+    temp_path = temp_file.name
+
+    try:
+
+        temp_file.write(
+            raw
+        )
+
+        temp_file.flush()
+
+    finally:
+
+        temp_file.close()
+
+    logger.info(
+        "Image downloaded successfully: %s bytes | %s",
+        len(raw),
+        temp_path
+    )
+
+    # --------------------------------------------------------
+    # Check actual image with Pillow if available
+    # --------------------------------------------------------
+
+    try:
+
+        from PIL import Image
+
+        with Image.open(
+            temp_path
+        ) as img:
+
+            logger.info(
+                "Detected image format: %s | size=%s",
+                img.format,
+                img.size
+            )
+
+            # ------------------------------------------------
+            # Bale-compatible JPG conversion
+            # ------------------------------------------------
+
+            if img.format in (
+                "WEBP",
+                "AVIF",
+            ):
+
+                converted_path = (
+                    temp_path + ".jpg"
+                )
+
+                rgb = img.convert(
+                    "RGB"
+                )
+
+                rgb.save(
+                    converted_path,
+                    "JPEG",
+                    quality=95
+                )
+
+                try:
+                    os.remove(
+                        temp_path
+                    )
+                except Exception:
+                    pass
+
+                temp_path = (
+                    converted_path
+                )
+
+                logger.info(
+                    "Image converted to JPG: %s",
+                    temp_path
+                )
+
+    except ImportError:
+
+        logger.warning(
+            "Pillow is not installed. "
+            "Using original image."
+        )
+
+    except Exception as image_check_error:
+
+        logger.warning(
+            "Could not inspect image: %s",
+            image_check_error
+        )
+
+    return temp_path
+
+
+# ============================================================
+# SEND IMAGE TO BALE
+# ============================================================
+
+async def send_downloaded_image(
+    chat_id,
+    image_path,
+    caption
+):
+
+    logger.info(
+        "Uploading image to Bale: %s",
+        image_path
+    )
+
+    if not os.path.exists(
+        image_path
+    ):
+
+        raise FileNotFoundError(
+            f"Image file does not exist: {image_path}"
+        )
+
+    file_size = os.path.getsize(
+        image_path
+    )
+
+    logger.info(
+        "Upload file size: %s bytes",
+        file_size
+    )
+
+    if file_size <= 0:
+
+        raise ValueError(
+            "فایل تصویر خالی است."
+        )
+
+    # ========================================================
+    # IMPORTANT
+    # ========================================================
+    #
+    # تصویر دیگر به صورت URL به Bale داده نمی‌شود.
+    #
+    # فایل را با open می‌خوانیم و با InputFile
+    # مستقیماً برای Bale آپلود می‌کنیم.
+    #
+    # ========================================================
+
+    with open(
+        image_path,
+        "rb"
+    ) as image_file:
+
+        image_bytes = (
+            image_file.read()
+        )
+
+    input_file = bale.InputFile(
+        image_bytes,
+        file_name="gamefa.jpg"
+    )
+
+    result = await bot.send_photo(
+        chat_id=chat_id,
+        photo=input_file,
+        caption=caption
+    )
+
+    logger.info(
+        "Image uploaded to Bale successfully."
+    )
+
+    return result
 
 
 # ============================================================
@@ -1035,7 +1222,7 @@ async def on_message(message):
             return
 
         # ----------------------------------------------------
-        # ADMIN CHECK
+        # ADMIN
         # ----------------------------------------------------
 
         if not is_admin(
@@ -1045,7 +1232,7 @@ async def on_message(message):
             return
 
         # ----------------------------------------------------
-        # MESSAGE CONTENT
+        # CONTENT
         # ----------------------------------------------------
 
         content = (
@@ -1074,7 +1261,7 @@ async def on_message(message):
                 "ربات به صورت خودکار:\n"
                 "📢 عنوان خبر\n"
                 "🟣 دو پاراگراف اول\n"
-                "🖼 تصویر خبر\n"
+                "🖼 تصویر شاخص\n"
                 "📑 لینک ادامه خبر\n"
                 "🆔 آیدی کانال\n\n"
                 "را آماده می‌کند."
@@ -1083,7 +1270,7 @@ async def on_message(message):
             return
 
         # ----------------------------------------------------
-        # EXTRACT URL
+        # URL
         # ----------------------------------------------------
 
         url = extract_url(
@@ -1091,10 +1278,11 @@ async def on_message(message):
         )
 
         if not url:
+
             return
 
         # ----------------------------------------------------
-        # GAMEFA URL CHECK
+        # GAMEFA CHECK
         # ----------------------------------------------------
 
         if not is_gamefa_url(
@@ -1102,8 +1290,8 @@ async def on_message(message):
         ):
 
             await message.reply(
-                "❌ فقط لینک‌های سایت Gamefa.com "
-                "قابل پردازش هستند."
+                "❌ فقط لینک‌های سایت "
+                "Gamefa.com قابل پردازش هستند."
             )
 
             return
@@ -1123,6 +1311,11 @@ async def on_message(message):
             # =================================================
             # FETCH ARTICLE
             # =================================================
+
+            logger.info(
+                "Fetching article: %s",
+                url
+            )
 
             soup = fetch_soup(
                 url
@@ -1150,6 +1343,11 @@ async def on_message(message):
                 url
             )
 
+            logger.info(
+                "Detected image URL: %s",
+                image_url
+            )
+
             # =================================================
             # PARAGRAPHS
             # =================================================
@@ -1158,22 +1356,19 @@ async def on_message(message):
                 soup
             )
 
-            if len(paragraphs) < 2:
+            if len(
+                paragraphs
+            ) < 2:
 
-                try:
-
-                    await processing.edit(
-                        "❌ نتوانستم دو پاراگراف واقعی "
-                        "از مقاله پیدا کنم."
-                    )
-
-                except Exception:
-                    pass
+                await processing.edit(
+                    "❌ نتوانستم دو پاراگراف واقعی "
+                    "از مقاله پیدا کنم."
+                )
 
                 return
 
             # =================================================
-            # BUILD CAPTION
+            # CAPTION
             # =================================================
 
             caption = build_caption(
@@ -1188,64 +1383,76 @@ async def on_message(message):
 
             if image_url:
 
-                image_path = download_image(
-                    image_url=image_url,
-                    page_url=url
-                )
+                try:
+
+                    image_path = download_image(
+                        image_url=image_url,
+                        article_url=url
+                    )
+
+                except Exception as download_error:
+
+                    logger.exception(
+                        "Image download failed: %s",
+                        download_error
+                    )
+
+                    image_path = None
 
             # =================================================
             # SEND IMAGE
             # =================================================
 
-            sent_image = False
-
             if image_path:
 
                 try:
 
-                    logger.info(
-                        "Uploading downloaded image to Bale..."
-                    )
-
-                    # -----------------------------------------
-                    # تلاش اول:
-                    # ارسال فایل محلی
-                    # -----------------------------------------
-
-                    await bot.send_photo(
+                    await send_downloaded_image(
                         chat_id=user_id,
-                        photo=image_path,
-                        caption=caption,
+                        image_path=image_path,
+                        caption=caption
                     )
 
-                    sent_image = True
+                    # -----------------------------------------
+                    # IMAGE SUCCESS
+                    # -----------------------------------------
 
                     logger.info(
-                        "Image sent successfully."
+                        "News + image sent successfully."
                     )
 
-                except Exception as image_error:
+                except Exception as upload_error:
 
                     logger.exception(
                         "Bale image upload failed: %s",
-                        image_error
+                        upload_error
                     )
 
-                    sent_image = False
+                    # -----------------------------------------
+                    # IMPORTANT:
+                    #
+                    # فقط در صورت شکست واقعی ارسال تصویر،
+                    # هشدار را نشان می‌دهیم.
+                    # -----------------------------------------
 
-            # =================================================
-            # FALLBACK TEXT ONLY
-            # =================================================
+                    await message.reply(
+                        "⚠️ ارسال تصویر با مشکل مواجه شد.\n\n"
+                        + caption
+                    )
 
-            if not sent_image:
+            else:
+
+                # =================================================
+                # NO IMAGE
+                # =================================================
 
                 logger.warning(
-                    "Sending text-only news because image "
-                    "could not be uploaded."
+                    "No downloadable image was found."
                 )
 
                 await message.reply(
-                    caption
+                    "⚠️ تصویر شاخص مقاله پیدا نشد.\n\n"
+                    + caption
                 )
 
             # =================================================
@@ -1267,7 +1474,7 @@ async def on_message(message):
             )
 
         # =====================================================
-        # HTTP ERROR
+        # REQUEST ERROR
         # =====================================================
 
         except requests.RequestException as error:
@@ -1281,7 +1488,8 @@ async def on_message(message):
 
                 await processing.edit(
                     "❌ هنگام دریافت مقاله از گیمفا "
-                    "خطای شبکه رخ داد."
+                    "خطای شبکه رخ داد.\n\n"
+                    f"{error}"
                 )
 
             except Exception:
@@ -1308,11 +1516,11 @@ async def on_message(message):
             except Exception:
                 pass
 
-        finally:
+        # =====================================================
+        # DELETE TEMP IMAGE
+        # =====================================================
 
-            # =================================================
-            # DELETE TEMP IMAGE
-            # =================================================
+        finally:
 
             if image_path:
 
@@ -1355,11 +1563,6 @@ async def on_message(message):
 
 def run_with_retry():
 
-    """
-    Bale خودش event loop را مدیریت می‌کند.
-    بنابراین bot.run() مستقیماً اجرا می‌شود.
-    """
-
     attempt = 0
 
     while True:
@@ -1373,8 +1576,9 @@ def run_with_retry():
                 attempt
             )
 
-            # مهم:
-            # اینجا asyncio.run() استفاده نمی‌شود.
+            # =================================================
+            # DO NOT USE asyncio.run()
+            # =================================================
 
             bot.run()
 
@@ -1398,7 +1602,8 @@ def run_with_retry():
         ) as error:
 
             logger.warning(
-                "Network error: %s | retrying in %s seconds...",
+                "Network error: %s | "
+                "retrying in %s seconds...",
                 error,
                 RETRY_DELAY
             )
@@ -1456,6 +1661,16 @@ if __name__ == "__main__":
 
     try:
 
+        # ----------------------------------------------------
+        # IMPORTANT
+        # ----------------------------------------------------
+        #
+        # اینجا هم asyncio.run() ممنوع است.
+        #
+        # Bale خودش event loop را مدیریت می‌کند.
+        #
+        # ----------------------------------------------------
+
         run_with_retry()
 
     except KeyboardInterrupt:
@@ -1469,4 +1684,4 @@ if __name__ == "__main__":
         logger.exception(
             "Fatal error: %s",
             error
-            )
+    )
