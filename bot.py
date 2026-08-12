@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+import asyncio
 from html import unescape
 from urllib.parse import urlparse
 
@@ -18,6 +19,8 @@ ADMIN_IDS = {
     if x.strip().isdigit()
 }
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "10"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "15"))
 FOOTER = "@Gamefa_official"
 
 logging.basicConfig(
@@ -271,5 +274,45 @@ async def on_message(message):
     except Exception as e:
         logger.exception("Unhandled message error: %s", e)
 
+async def run_with_retry():
+    attempt = 0
+
+    while True:
+        attempt += 1
+        try:
+            logger.info("Starting Bale bot (attempt %s)...", attempt)
+            bot.run()
+            logger.warning(
+                "Bot stopped. Retrying in %s seconds...",
+                RETRY_DELAY
+            )
+            await asyncio.sleep(RETRY_DELAY)
+
+        except (OSError, ConnectionError, TimeoutError) as e:
+            logger.warning(
+                "Network error: %s | retrying in %s seconds...",
+                e,
+                RETRY_DELAY
+            )
+            await asyncio.sleep(RETRY_DELAY)
+
+        except Exception as e:
+            logger.exception(
+                "Bale connection/runtime error: %s | retrying in %s seconds...",
+                e,
+                RETRY_DELAY
+            )
+            await asyncio.sleep(RETRY_DELAY)
+
+        if attempt >= MAX_RETRIES:
+            logger.warning(
+                "Reached MAX_RETRIES=%s; resetting retry counter.",
+                MAX_RETRIES
+            )
+            attempt = 0
+
 if __name__ == "__main__":
-    bot.run()
+    try:
+        asyncio.run(run_with_retry())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
