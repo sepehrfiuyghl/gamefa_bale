@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import uuid
 import logging
 import tempfile
 from html import unescape
@@ -33,20 +32,14 @@ ADMIN_IDS = {
 }
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
+IMAGE_TIMEOUT = int(os.getenv("IMAGE_TIMEOUT", "60"))
+
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "10"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY", "15"))
 
 FOOTER = "@Gamefa_official"
 
-TEMP_DIR = os.path.join(
-    tempfile.gettempdir(),
-    "gamefa_bale_bot"
-)
-
-os.makedirs(
-    TEMP_DIR,
-    exist_ok=True
-)
+MAX_IMAGE_SIZE = 15 * 1024 * 1024
 
 
 # ============================================================
@@ -62,7 +55,7 @@ logger = logging.getLogger("gamefa-bale-bot")
 
 
 # ============================================================
-# VALIDATE TOKEN
+# TOKEN VALIDATION
 # ============================================================
 
 if not BALE_TOKEN:
@@ -80,18 +73,15 @@ session = requests.Session()
 session.headers.update({
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/128.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/128.0 Safari/537.36"
     ),
     "Accept": (
-        "text/html,application/xhtml+xml,"
-        "application/xml;q=0.9,image/avif,image/webp,"
-        "image/apng,*/*;q=0.8"
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
     ),
     "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": "https://gamefa.com/",
-    "Connection": "keep-alive",
 })
 
 
@@ -119,27 +109,28 @@ def clean_text(text):
     text = text.replace("\u200c", "\u200c")
 
     text = re.sub(r"[ \t]+", " ", text)
-
-    text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        text
-    )
+    text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
 
 
 # ============================================================
-# URL
+# URL HELPERS
 # ============================================================
 
-def normalize_url(url):
+def normalize_url(url, base_url=None):
     if not url:
         return ""
 
-    url = url.strip().strip("<>")
+    url = str(url).strip().strip("<>\"'")
 
-    if not url.startswith(("http://", "https://")):
+    if url.startswith("//"):
+        url = "https:" + url
+
+    elif base_url and not url.startswith(("http://", "https://")):
+        url = urljoin(base_url, url)
+
+    elif not url.startswith(("http://", "https://")):
         url = "https://" + url
 
     return url
@@ -159,7 +150,7 @@ def extract_url(text):
         url = match.group(0)
 
         url = url.rstrip(
-            ").,؛،!؟\"'"
+            ").,؛،!؟"
         )
 
         return normalize_url(url)
@@ -174,7 +165,7 @@ def extract_url(text):
         url = match.group(0)
 
         url = url.rstrip(
-            ").,؛،!؟\"'"
+            ").,؛،!؟"
         )
 
         return normalize_url(url)
@@ -205,10 +196,7 @@ def is_gamefa_url(url):
 # ============================================================
 
 def fetch_soup(url):
-    logger.info(
-        "Downloading article: %s",
-        url
-    )
+    logger.info("Downloading article: %s", url)
 
     response = session.get(
         url,
@@ -242,8 +230,6 @@ def extract_title(soup):
         "h1.entry-title",
         "h1.post-title",
         "article h1",
-        ".entry-header h1",
-        ".post-header h1",
         "main h1",
         "h1",
     ]
@@ -278,83 +264,93 @@ def extract_title(soup):
         if title:
             return title
 
+    title_tag = soup.find("title")
+
+    if title_tag:
+
+        title = clean_text(
+            title_tag.get_text(
+                " ",
+                strip=True
+            )
+        )
+
+        if title:
+            return title
+
     return "خبر گیمفا"
 
 
 # ============================================================
-# IMAGE URL HELPERS
+# IMAGE URL EXTRACTION
 # ============================================================
 
-def clean_image_url(url, base_url):
-    if not url:
+def get_srcset_best_url(srcset):
+    """
+    از srcset بهترین/بزرگ‌ترین تصویر را انتخاب می‌کند.
+    """
+
+    if not srcset:
         return None
-
-    url = url.strip()
-
-    if url.startswith("//"):
-        url = "https:" + url
-
-    url = urljoin(
-        base_url,
-        url
-    )
-
-    return url
-
-
-def get_attribute_image(element):
-
-    attributes = [
-        "src",
-        "data-src",
-        "data-lazy-src",
-        "data-original",
-        "data-image",
-        "data-url",
-        "data-flickity-lazyload",
-    ]
-
-    for attr in attributes:
-
-        value = element.get(attr)
-
-        if value:
-            return value.strip()
-
-    # srcset
-    srcset = element.get("srcset")
-
-    if srcset:
-
-        parts = [
-            x.strip()
-            for x in srcset.split(",")
-            if x.strip()
-        ]
-
-        if parts:
-
-            # آخرین تصویر معمولاً رزولوشن بالاتری دارد
-            last = parts[-1]
-
-            image_url = last.split()[0]
-
-            if image_url:
-                return image_url
-
-    return None
-
-
-# ============================================================
-# EXTRACT IMAGE
-# ============================================================
-
-def extract_image(soup, article_url):
 
     candidates = []
 
+    for item in srcset.split(","):
+
+        item = item.strip()
+
+        if not item:
+            continue
+
+        parts = item.split()
+
+        image_url = parts[0]
+
+        score = 0
+
+        if len(parts) > 1:
+
+            descriptor = parts[1]
+
+            match = re.match(
+                r"(\d+)w",
+                descriptor
+            )
+
+            if match:
+                score = int(match.group(1))
+
+            else:
+
+                match = re.match(
+                    r"([\d.]+)x",
+                    descriptor
+                )
+
+                if match:
+                    score = int(
+                        float(match.group(1)) * 1000
+                    )
+
+        candidates.append(
+            (score, image_url)
+        )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda x: x[0],
+        reverse=True
+    )
+
+    return candidates[0][1]
+
+
+def extract_image(soup, page_url):
+
     # --------------------------------------------------------
-    # OpenGraph
+    # 1. OpenGraph
     # --------------------------------------------------------
 
     meta = soup.find(
@@ -367,59 +363,51 @@ def extract_image(soup, article_url):
         image = meta.get("content")
 
         if image:
-            candidates.append(image)
-
-    # --------------------------------------------------------
-    # Twitter
-    # --------------------------------------------------------
-
-    for attrs in [
-        {"name": "twitter:image"},
-        {"property": "twitter:image"},
-    ]:
-
-        meta = soup.find(
-            "meta",
-            attrs=attrs
-        )
-
-        if meta:
-
-            image = meta.get("content")
-
-            if image:
-                candidates.append(image)
-
-    # --------------------------------------------------------
-    # Schema / JSON-LD
-    # --------------------------------------------------------
-
-    for script in soup.find_all(
-        "script",
-        type="application/ld+json"
-    ):
-
-        try:
-
-            raw = script.string or script.get_text()
-
-            if not raw:
-                continue
-
-            # جستجوی URL تصویر بدون نیاز به parse کامل JSON
-            matches = re.findall(
-                r'https?://[^"\']+\.(?:jpg|jpeg|png|webp)(?:\?[^"\']*)?',
-                raw,
-                re.IGNORECASE
+            image = normalize_url(
+                image,
+                page_url
             )
 
-            candidates.extend(matches)
+            if image:
+                logger.info(
+                    "Image found from og:image: %s",
+                    image
+                )
 
-        except Exception:
-            pass
+                return image
 
     # --------------------------------------------------------
-    # Article images
+    # 2. Twitter
+    # --------------------------------------------------------
+
+    meta = soup.find(
+        "meta",
+        attrs={
+            "name": "twitter:image"
+        }
+    )
+
+    if meta:
+
+        image = meta.get("content")
+
+        if image:
+
+            image = normalize_url(
+                image,
+                page_url
+            )
+
+            if image:
+                logger.info(
+                    "Image found from twitter:image: %s",
+                    image
+                )
+
+                return image
+
+    # --------------------------------------------------------
+    # 3. Article images
     # --------------------------------------------------------
 
     selectors = [
@@ -434,64 +422,309 @@ def extract_image(soup, article_url):
 
     for selector in selectors:
 
-        for image_element in soup.select(selector):
+        images = soup.select(selector)
 
-            image_url = get_attribute_image(
-                image_element
+        for image_tag in images:
+
+            srcset = (
+                image_tag.get("srcset")
+                or image_tag.get("data-srcset")
+                or image_tag.get("data-lazy-srcset")
             )
 
-            if image_url:
-                candidates.append(
-                    image_url
+            image = get_srcset_best_url(
+                srcset
+            )
+
+            if not image:
+
+                possible_attributes = [
+                    "data-lazy-src",
+                    "data-src",
+                    "data-original",
+                    "data-url",
+                    "src",
+                ]
+
+                for attribute in possible_attributes:
+
+                    value = image_tag.get(
+                        attribute
+                    )
+
+                    if value:
+                        image = value
+                        break
+
+            if image:
+
+                image = normalize_url(
+                    image,
+                    page_url
                 )
 
-    # --------------------------------------------------------
-    # Normalize + remove duplicates
-    # --------------------------------------------------------
+                if image:
 
-    final_candidates = []
+                    logger.info(
+                        "Image found from article: %s",
+                        image
+                    )
 
-    seen = set()
+                    return image
 
-    for image_url in candidates:
-
-        image_url = clean_image_url(
-            image_url,
-            article_url
-        )
-
-        if not image_url:
-            continue
-
-        if image_url in seen:
-            continue
-
-        seen.add(image_url)
-
-        final_candidates.append(
-            image_url
-        )
-
-    logger.info(
-        "Found %s image candidates.",
-        len(final_candidates)
+    logger.warning(
+        "No image URL found."
     )
 
-    for index, image_url in enumerate(
-        final_candidates,
-        start=1
-    ):
+    return None
 
-        logger.info(
-            "Image candidate %s: %s",
-            index,
-            image_url
+
+# ============================================================
+# DOWNLOAD IMAGE
+# ============================================================
+
+def download_image(image_url, page_url):
+    """
+    تصویر را از Gamefa دانلود می‌کند
+    و مسیر فایل موقت را برمی‌گرداند.
+    """
+
+    if not image_url:
+        return None
+
+    image_url = normalize_url(
+        image_url,
+        page_url
+    )
+
+    logger.info(
+        "Downloading image: %s",
+        image_url
+    )
+
+    image_headers = {
+        "User-Agent": session.headers["User-Agent"],
+        "Accept": (
+            "image/avif,image/webp,image/apng,"
+            "image/svg+xml,image/*,*/*;q=0.8"
+        ),
+        "Referer": page_url,
+    }
+
+    temp_path = None
+
+    try:
+
+        response = session.get(
+            image_url,
+            headers=image_headers,
+            timeout=IMAGE_TIMEOUT,
+            stream=True,
+            allow_redirects=True
         )
 
-    if final_candidates:
-        return final_candidates
+        response.raise_for_status()
 
-    return []
+        content_type = (
+            response.headers
+            .get("Content-Type", "")
+            .lower()
+        )
+
+        logger.info(
+            "Image response: status=%s content-type=%s",
+            response.status_code,
+            content_type
+        )
+
+        # ----------------------------------------------------
+        # بررسی نوع فایل
+        # ----------------------------------------------------
+
+        allowed_types = (
+            "image/jpeg",
+            "image/jpg",
+            "image/png",
+            "image/webp",
+            "image/gif",
+            "image/bmp",
+            "image/avif",
+        )
+
+        # بعضی سرورها Content-Type اشتباه می‌فرستند.
+        # در این حالت همچنان فایل را دانلود می‌کنیم.
+        if (
+            content_type
+            and not content_type.startswith("image/")
+            and "octet-stream" not in content_type
+        ):
+
+            logger.warning(
+                "URL does not look like an image: %s",
+                content_type
+            )
+
+        # ----------------------------------------------------
+        # حجم فایل
+        # ----------------------------------------------------
+
+        content_length = response.headers.get(
+            "Content-Length"
+        )
+
+        if content_length:
+
+            try:
+
+                content_length = int(
+                    content_length
+                )
+
+                if content_length > MAX_IMAGE_SIZE:
+
+                    logger.warning(
+                        "Image too large: %s bytes",
+                        content_length
+                    )
+
+                    return None
+
+            except ValueError:
+                pass
+
+        # ----------------------------------------------------
+        # تعیین پسوند
+        # ----------------------------------------------------
+
+        extension = ".jpg"
+
+        if "png" in content_type:
+            extension = ".png"
+
+        elif "webp" in content_type:
+            extension = ".webp"
+
+        elif "gif" in content_type:
+            extension = ".gif"
+
+        elif "bmp" in content_type:
+            extension = ".bmp"
+
+        elif "avif" in content_type:
+            extension = ".avif"
+
+        else:
+
+            path = urlparse(
+                response.url
+            ).path.lower()
+
+            for ext in (
+                ".jpg",
+                ".jpeg",
+                ".png",
+                ".webp",
+                ".gif",
+                ".bmp",
+                ".avif",
+            ):
+
+                if path.endswith(ext):
+
+                    extension = ext
+                    break
+
+        # ----------------------------------------------------
+        # ساخت فایل موقت
+        # ----------------------------------------------------
+
+        fd, temp_path = tempfile.mkstemp(
+            suffix=extension
+        )
+
+        os.close(fd)
+
+        total_size = 0
+
+        with open(
+            temp_path,
+            "wb"
+        ) as file:
+
+            for chunk in response.iter_content(
+                chunk_size=64 * 1024
+            ):
+
+                if not chunk:
+                    continue
+
+                total_size += len(chunk)
+
+                if total_size > MAX_IMAGE_SIZE:
+
+                    logger.warning(
+                        "Image exceeded maximum size."
+                    )
+
+                    file.close()
+
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+
+                    return None
+
+                file.write(chunk)
+
+        # ----------------------------------------------------
+        # بررسی اینکه فایل واقعاً خالی نباشد
+        # ----------------------------------------------------
+
+        if not os.path.exists(temp_path):
+
+            return None
+
+        file_size = os.path.getsize(
+            temp_path
+        )
+
+        if file_size < 100:
+
+            logger.warning(
+                "Downloaded image is too small."
+            )
+
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+            return None
+
+        logger.info(
+            "Image downloaded successfully: %s bytes -> %s",
+            file_size,
+            temp_path
+        )
+
+        return temp_path
+
+    except Exception as error:
+
+        logger.warning(
+            "Image download failed: %s",
+            error
+        )
+
+        if temp_path:
+
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+        return None
 
 
 # ============================================================
@@ -537,12 +770,11 @@ def remove_unwanted(container):
 
     for selector in selectors:
 
-        for element in container.select(selector):
+        for element in container.select(
+            selector
+        ):
 
-            try:
-                element.decompose()
-            except Exception:
-                pass
+            element.decompose()
 
 
 # ============================================================
@@ -568,9 +800,9 @@ def valid_paragraph(text):
         "عضویت",
         "دنبال کنید",
         "ادامه مطلب",
-        "ادامه خبر",
-        "گیمفا را در",
-        "ما را دنبال کنید",
+        "بیشتر بخوانید",
+        "کپی لینک",
+        "منبع",
     ]
 
     for word in unwanted:
@@ -602,53 +834,47 @@ def extract_paragraphs(soup):
 
     for selector in selectors:
 
-        containers = soup.select(selector)
+        containers = soup.select(
+            selector
+        )
 
         for container in containers:
 
-            try:
+            copy = BeautifulSoup(
+                str(container),
+                "html.parser"
+            )
 
-                copy = BeautifulSoup(
-                    str(container),
-                    "html.parser"
-                )
+            remove_unwanted(copy)
 
-                remove_unwanted(copy)
+            paragraphs = []
 
-                paragraphs = []
+            for paragraph in copy.find_all("p"):
 
-                for paragraph in copy.find_all("p"):
-
-                    text = clean_text(
-                        paragraph.get_text(
-                            " ",
-                            strip=True
-                        )
+                text = clean_text(
+                    paragraph.get_text(
+                        " ",
+                        strip=True
                     )
-
-                    if not valid_paragraph(text):
-                        continue
-
-                    if text in paragraphs:
-                        continue
-
-                    paragraphs.append(text)
-
-                if len(paragraphs) > len(best_paragraphs):
-
-                    best_paragraphs = paragraphs
-
-            except Exception as error:
-
-                logger.warning(
-                    "Paragraph extraction error: %s",
-                    error
                 )
 
-    logger.info(
-        "Extracted %s valid paragraphs.",
-        len(best_paragraphs)
-    )
+                if not valid_paragraph(
+                    text
+                ):
+                    continue
+
+                if text in paragraphs:
+                    continue
+
+                paragraphs.append(
+                    text
+                )
+
+            if len(paragraphs) > len(
+                best_paragraphs
+            ):
+
+                best_paragraphs = paragraphs
 
     return best_paragraphs[:2]
 
@@ -662,20 +888,38 @@ def md_escape(text):
     if not text:
         return ""
 
-    # برای MarkdownV1
-    for character in [
+    # ترتیب مهم است
+    text = text.replace(
         "\\",
-        "_",
-        "*",
-        "`",
-        "[",
-        "]",
-    ]:
+        "\\\\"
+    )
 
-        text = text.replace(
-            character,
-            "\\" + character
-        )
+    text = text.replace(
+        "_",
+        "\\_"
+    )
+
+    text = text.replace(
+        "*",
+        "\\*"
+    )
+
+    text = text.replace(
+        "`",
+        "\\`"
+    )
+
+    # برای اینکه [عنوان] لینک خراب نشود،
+    # در عنوان فقط کاراکترهای مشکل‌ساز را کنترل می‌کنیم.
+    text = text.replace(
+        "[",
+        "\\["
+    )
+
+    text = text.replace(
+        "]",
+        "\\]"
+    )
 
     return text
 
@@ -690,7 +934,9 @@ def build_caption(
     url
 ):
 
-    title = md_escape(title)
+    title = md_escape(
+        title
+    )
 
     paragraph_1 = md_escape(
         paragraphs[0]
@@ -699,10 +945,6 @@ def build_caption(
     paragraph_2 = md_escape(
         paragraphs[1]
     )
-
-    # ========================================================
-    # قالب نهایی دقیقاً طبق چیزی که خواستی
-    # ========================================================
 
     lines = [
         f"📢 *[{title}]({url})*",
@@ -716,207 +958,9 @@ def build_caption(
         f"🆔 *{FOOTER}*",
     ]
 
-    return "\n".join(lines)
-
-
-# ============================================================
-# DOWNLOAD IMAGE
-# ============================================================
-
-def download_image(
-    image_url,
-    article_url
-):
-
-    logger.info(
-        "Trying to download image: %s",
-        image_url
+    return "\n".join(
+        lines
     )
-
-    headers = {
-        "User-Agent": session.headers["User-Agent"],
-        "Accept": (
-            "image/avif,image/webp,image/apng,"
-            "image/svg+xml,image/*,*/*;q=0.8"
-        ),
-        "Referer": article_url,
-    }
-
-    try:
-
-        response = session.get(
-            image_url,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
-            stream=True,
-            allow_redirects=True
-        )
-
-        response.raise_for_status()
-
-        content_type = (
-            response.headers.get(
-                "Content-Type",
-                ""
-            )
-            .lower()
-        )
-
-        logger.info(
-            "Image response: status=%s content-type=%s size=%s",
-            response.status_code,
-            content_type,
-            response.headers.get(
-                "Content-Length",
-                "unknown"
-            )
-        )
-
-        # ----------------------------------------------------
-        # تشخیص پسوند
-        # ----------------------------------------------------
-
-        extension = ".jpg"
-
-        if "png" in content_type:
-            extension = ".png"
-
-        elif "webp" in content_type:
-            extension = ".webp"
-
-        elif "jpeg" in content_type:
-            extension = ".jpg"
-
-        elif "gif" in content_type:
-            extension = ".gif"
-
-        else:
-
-            path = urlparse(
-                response.url
-            ).path.lower()
-
-            if path.endswith(".png"):
-                extension = ".png"
-
-            elif path.endswith(".webp"):
-                extension = ".webp"
-
-            elif path.endswith(".jpeg"):
-                extension = ".jpg"
-
-            elif path.endswith(".jpg"):
-                extension = ".jpg"
-
-        # ----------------------------------------------------
-        # فایل موقت
-        # ----------------------------------------------------
-
-        filename = (
-            "gamefa_"
-            + uuid.uuid4().hex
-            + extension
-        )
-
-        filepath = os.path.join(
-            TEMP_DIR,
-            filename
-        )
-
-        total_size = 0
-
-        with open(
-            filepath,
-            "wb"
-        ) as file:
-
-            for chunk in response.iter_content(
-                chunk_size=64 * 1024
-            ):
-
-                if not chunk:
-                    continue
-
-                file.write(chunk)
-
-                total_size += len(chunk)
-
-        # ----------------------------------------------------
-        # Validate
-        # ----------------------------------------------------
-
-        if total_size < 100:
-
-            try:
-                os.remove(filepath)
-            except Exception:
-                pass
-
-            raise RuntimeError(
-                "فایل تصویر خالی یا بسیار کوچک است."
-            )
-
-        logger.info(
-            "Image downloaded successfully: %s bytes -> %s",
-            total_size,
-            filepath
-        )
-
-        return filepath
-
-    except Exception as error:
-
-        logger.warning(
-            "Failed to download image %s: %s",
-            image_url,
-            error
-        )
-
-        return None
-
-
-# ============================================================
-# TRY DOWNLOAD IMAGE CANDIDATES
-# ============================================================
-
-def download_best_image(
-    image_candidates,
-    article_url
-):
-
-    if not image_candidates:
-        return None
-
-    for index, image_url in enumerate(
-        image_candidates,
-        start=1
-    ):
-
-        logger.info(
-            "Trying image candidate %s/%s",
-            index,
-            len(image_candidates)
-        )
-
-        filepath = download_image(
-            image_url=image_url,
-            article_url=article_url
-        )
-
-        if filepath:
-
-            logger.info(
-                "Selected image: %s",
-                filepath
-            )
-
-            return filepath
-
-    logger.error(
-        "All image candidates failed."
-    )
-
-    return None
 
 
 # ============================================================
@@ -954,44 +998,6 @@ async def on_ready():
 
 
 # ============================================================
-# SEND PHOTO AS FILE
-# ============================================================
-
-async def send_image_file(
-    chat_id,
-    filepath,
-    caption
-):
-
-    logger.info(
-        "Uploading image to Bale: %s",
-        filepath
-    )
-
-    # ========================================================
-    # نکته مهم:
-    #
-    # URL را مستقیماً به Bale نمی‌دهیم.
-    #
-    # فایل دانلود شده را با InputFile ارسال می‌کنیم.
-    # ========================================================
-
-    input_file = bale.InputFile(
-        filepath
-    )
-
-    await bot.send_photo(
-        chat_id=chat_id,
-        photo=input_file,
-        caption=caption,
-    )
-
-    logger.info(
-        "Image uploaded successfully."
-    )
-
-
-# ============================================================
 # MESSAGE EVENT
 # ============================================================
 
@@ -1017,7 +1023,7 @@ async def on_message(message):
         )
 
         # ----------------------------------------------------
-        # IGNORE BOT
+        # BOT MESSAGE
         # ----------------------------------------------------
 
         if getattr(
@@ -1025,18 +1031,21 @@ async def on_message(message):
             "is_bot",
             False
         ):
-            return
-
-        # ----------------------------------------------------
-        # ADMIN ONLY
-        # ----------------------------------------------------
-
-        if not is_admin(user_id):
 
             return
 
         # ----------------------------------------------------
-        # CONTENT
+        # ADMIN CHECK
+        # ----------------------------------------------------
+
+        if not is_admin(
+            user_id
+        ):
+
+            return
+
+        # ----------------------------------------------------
+        # MESSAGE CONTENT
         # ----------------------------------------------------
 
         content = (
@@ -1065,7 +1074,7 @@ async def on_message(message):
                 "ربات به صورت خودکار:\n"
                 "📢 عنوان خبر\n"
                 "🟣 دو پاراگراف اول\n"
-                "🖼 تصویر شاخص\n"
+                "🖼 تصویر خبر\n"
                 "📑 لینک ادامه خبر\n"
                 "🆔 آیدی کانال\n\n"
                 "را آماده می‌کند."
@@ -1074,7 +1083,7 @@ async def on_message(message):
             return
 
         # ----------------------------------------------------
-        # URL
+        # EXTRACT URL
         # ----------------------------------------------------
 
         url = extract_url(
@@ -1085,10 +1094,12 @@ async def on_message(message):
             return
 
         # ----------------------------------------------------
-        # GAMEFA CHECK
+        # GAMEFA URL CHECK
         # ----------------------------------------------------
 
-        if not is_gamefa_url(url):
+        if not is_gamefa_url(
+            url
+        ):
 
             await message.reply(
                 "❌ فقط لینک‌های سایت Gamefa.com "
@@ -1105,7 +1116,7 @@ async def on_message(message):
             "⏳ در حال دریافت و پردازش خبر از گیمفا..."
         )
 
-        filepath = None
+        image_path = None
 
         try:
 
@@ -1131,10 +1142,10 @@ async def on_message(message):
             )
 
             # =================================================
-            # IMAGE
+            # IMAGE URL
             # =================================================
 
-            image_candidates = extract_image(
+            image_url = extract_image(
                 soup,
                 url
             )
@@ -1149,15 +1160,20 @@ async def on_message(message):
 
             if len(paragraphs) < 2:
 
-                await processing.edit(
-                    "❌ نتوانستم دو پاراگراف واقعی "
-                    "از مقاله پیدا کنم."
-                )
+                try:
+
+                    await processing.edit(
+                        "❌ نتوانستم دو پاراگراف واقعی "
+                        "از مقاله پیدا کنم."
+                    )
+
+                except Exception:
+                    pass
 
                 return
 
             # =================================================
-            # CAPTION
+            # BUILD CAPTION
             # =================================================
 
             caption = build_caption(
@@ -1170,23 +1186,42 @@ async def on_message(message):
             # DOWNLOAD IMAGE
             # =================================================
 
-            filepath = download_best_image(
-                image_candidates=image_candidates,
-                article_url=url
-            )
+            if image_url:
+
+                image_path = download_image(
+                    image_url=image_url,
+                    page_url=url
+                )
 
             # =================================================
             # SEND IMAGE
             # =================================================
 
-            if filepath:
+            sent_image = False
+
+            if image_path:
 
                 try:
 
-                    await send_image_file(
+                    logger.info(
+                        "Uploading downloaded image to Bale..."
+                    )
+
+                    # -----------------------------------------
+                    # تلاش اول:
+                    # ارسال فایل محلی
+                    # -----------------------------------------
+
+                    await bot.send_photo(
                         chat_id=user_id,
-                        filepath=filepath,
-                        caption=caption
+                        photo=image_path,
+                        caption=caption,
+                    )
+
+                    sent_image = True
+
+                    logger.info(
+                        "Image sent successfully."
                     )
 
                 except Exception as image_error:
@@ -1196,28 +1231,21 @@ async def on_message(message):
                         image_error
                     )
 
-                    # ----------------------------------------
-                    # اگر آپلود Bale شکست خورد
-                    # ----------------------------------------
+                    sent_image = False
 
-                    await message.reply(
-                        "⚠️ ارسال تصویر با مشکل مواجه شد.\n\n"
-                        + caption
-                    )
+            # =================================================
+            # FALLBACK TEXT ONLY
+            # =================================================
 
-            else:
+            if not sent_image:
 
-                # =================================================
-                # هیچ تصویری از سایت قابل دانلود نبود
-                # =================================================
-
-                logger.error(
-                    "No downloadable image found."
+                logger.warning(
+                    "Sending text-only news because image "
+                    "could not be uploaded."
                 )
 
                 await message.reply(
-                    "⚠️ تصویر شاخص خبر قابل دریافت نبود.\n\n"
-                    + caption
+                    caption
                 )
 
             # =================================================
@@ -1239,7 +1267,7 @@ async def on_message(message):
             )
 
         # =====================================================
-        # REQUEST ERROR
+        # HTTP ERROR
         # =====================================================
 
         except requests.RequestException as error:
@@ -1280,37 +1308,38 @@ async def on_message(message):
             except Exception:
                 pass
 
-        # =====================================================
-        # CLEAN TEMP FILE
-        # =====================================================
-
         finally:
 
-            if filepath:
+            # =================================================
+            # DELETE TEMP IMAGE
+            # =================================================
+
+            if image_path:
 
                 try:
 
-                    if os.path.exists(filepath):
+                    if os.path.exists(
+                        image_path
+                    ):
 
                         os.remove(
-                            filepath
+                            image_path
                         )
 
                         logger.info(
-                            "Temporary image deleted: %s",
-                            filepath
+                            "Temporary image deleted."
                         )
 
                 except Exception as cleanup_error:
 
                     logger.warning(
-                        "Could not delete temporary file: %s",
+                        "Could not delete temporary image: %s",
                         cleanup_error
                     )
 
-    # =========================================================
-    # UNHANDLED MESSAGE ERROR
-    # =========================================================
+    # ========================================================
+    # GLOBAL MESSAGE ERROR
+    # ========================================================
 
     except Exception as error:
 
@@ -1327,18 +1356,8 @@ async def on_message(message):
 def run_with_retry():
 
     """
-    مهم:
-
-    bot.run() خودش event loop را مدیریت می‌کند.
-
-    بنابراین نباید بنویسیم:
-
-        asyncio.run(bot.run())
-
-    یا:
-
-        asyncio.run(run_with_retry())
-
+    Bale خودش event loop را مدیریت می‌کند.
+    بنابراین bot.run() مستقیماً اجرا می‌شود.
     """
 
     attempt = 0
@@ -1354,9 +1373,8 @@ def run_with_retry():
                 attempt
             )
 
-            # =================================================
-            # اجرای مستقیم Bale
-            # =================================================
+            # مهم:
+            # اینجا asyncio.run() استفاده نمی‌شود.
 
             bot.run()
 
@@ -1402,14 +1420,11 @@ def run_with_retry():
                 RETRY_DELAY
             )
 
-        # ----------------------------------------------------
-        # RESET
-        # ----------------------------------------------------
-
         if attempt >= MAX_RETRIES:
 
             logger.warning(
-                "Reached MAX_RETRIES=%s. Resetting counter.",
+                "Reached MAX_RETRIES=%s. "
+                "Resetting retry counter.",
                 MAX_RETRIES
             )
 
@@ -1436,21 +1451,10 @@ if __name__ == "__main__":
     )
 
     logger.info(
-        "Temporary directory: %s",
-        TEMP_DIR
-    )
-
-    logger.info(
         "========================================"
     )
 
     try:
-
-        # =====================================================
-        # فقط همین:
-        #
-        # bot.run() خودش event loop می‌سازد.
-        # =====================================================
 
         run_with_retry()
 
@@ -1465,4 +1469,4 @@ if __name__ == "__main__":
         logger.exception(
             "Fatal error: %s",
             error
-        )
+            )
