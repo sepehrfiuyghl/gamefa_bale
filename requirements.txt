@@ -1,4 +1,4 @@
-python-bale-bot==2.5.0
-requests==2.32.4
-beautifulsoup4==4.13.4
-python-dotenv==1.1.1
+bale-bot
+requests
+beautifulsoup4
+python-dotenv
