@@ -2,51 +2,33 @@ import os
 import re
 import logging
 from html import unescape
-from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-import bale
-
+from bale import Bot
 
 load_dotenv()
 
 TOKEN = os.getenv("BALE_TOKEN")
-ADMIN_IDS = [
+
+ADMIN_IDS = {
     int(x.strip())
     for x in os.getenv("ADMIN_IDS", "").split(",")
     if x.strip().isdigit()
-]
-
+}
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-
-if not TOKEN:
-    raise Exception("BALE_TOKEN تنظیم نشده است")
-
-
-bot = bale.Bot(token=TOKEN)
-
+bot = Bot(token=TOKEN)
 
 session = requests.Session()
-
 session.headers.update({
-    "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    "User-Agent": "Mozilla/5.0"
 })
-
-
-# -------------------------
-# ابزارها
-# -------------------------
-
-def is_admin(user_id):
-    return int(user_id) in ADMIN_IDS
 
 
 def clean(text):
@@ -63,7 +45,14 @@ def clean(text):
     ).strip()
 
 
+def is_admin(user_id):
+    return int(user_id) in ADMIN_IDS
+
+
 def get_url(text):
+
+    if not text:
+        return None
 
     match = re.search(
         r"https?://[^\s]+",
@@ -71,46 +60,28 @@ def get_url(text):
     )
 
     if match:
-        return match.group(0)
+        return match.group(0).rstrip(
+            ").,،"
+        )
 
     return None
 
 
-
-def valid_gamefa(url):
-
-    try:
-
-        host = urlparse(url).netloc
-
-        return (
-            "gamefa.com" in host
-        )
-
-    except:
-
-        return False
-
-
-
-# -------------------------
-# دریافت مقاله
-# -------------------------
-
 def get_page(url):
 
-    r = session.get(
+    response = session.get(
         url,
         timeout=20
     )
 
-    r.raise_for_status()
+    response.raise_for_status()
+
+    response.encoding = response.apparent_encoding
 
     return BeautifulSoup(
-        r.text,
+        response.text,
         "html.parser"
     )
-
 
 
 def get_title(soup):
@@ -119,7 +90,7 @@ def get_title(soup):
 
     if h1:
         return clean(
-            h1.text
+            h1.get_text(" ", strip=True)
         )
 
     return "خبر گیمفا"
@@ -128,14 +99,13 @@ def get_title(soup):
 
 def get_image(soup):
 
-    img = soup.find(
+    image = soup.find(
         "meta",
         property="og:image"
     )
 
-    if img:
-
-        return img.get(
+    if image:
+        return image.get(
             "content"
         )
 
@@ -145,48 +115,27 @@ def get_image(soup):
 
 def get_paragraphs(soup):
 
-    paragraphs=[]
+    result = []
 
-
-    article = soup.find(
-        "article"
-    )
-
-
-    if not article:
-
-        article = soup
-
-
-
-    for p in article.find_all("p"):
+    for p in soup.find_all("p"):
 
         text = clean(
-            p.text
+            p.get_text(" ", strip=True)
         )
 
-        if len(text) > 50:
+        if len(text) >= 50:
 
-            paragraphs.append(
-                text
-            )
+            result.append(text)
 
-
-        if len(paragraphs)==2:
-
+        if len(result) == 2:
             break
 
 
-
-    return paragraphs
-
+    return result
 
 
-# -------------------------
-# ساخت متن
-# -------------------------
 
-def make_caption(
+def create_caption(
     title,
     paragraphs,
     url
@@ -202,19 +151,15 @@ def make_caption(
 *[ادامه خبر📑]({url})*
 
 🆔 *@Gamefa_official*
-"""
+""".strip()
 
 
-
-# -------------------------
-# پیام ها
-# -------------------------
 
 @bot.event
 async def on_ready():
 
     logging.info(
-        "Gamefa Bale Bot Started"
+        "Gamefa Bale Bot is READY"
     )
 
 
@@ -222,54 +167,50 @@ async def on_ready():
 @bot.event
 async def on_message(message):
 
-    try:
+    user_id = message.author.id
 
-        user_id = message.author.id
-
-
-        if not is_admin(user_id):
-
-            return
+    if not is_admin(user_id):
+        return
 
 
-
-        text = message.content
-
-
-        if text == "/start":
-
-            await message.reply(
-                "✅ ربات اخبار گیمفا فعال است.\n\n"
-                "لینک خبر گیمفا را ارسال کنید."
-            )
-
-            return
+    text = message.content or ""
 
 
-
-        url = get_url(text)
-
-
-        if not url:
-
-            return
-
-
-
-        if not valid_gamefa(url):
-
-            await message.reply(
-                "❌ فقط لینک Gamefa قبول می‌شود."
-            )
-
-            return
-
-
+    if text == "/start":
 
         await message.reply(
-            "⏳ در حال دریافت خبر..."
+            "سلام 👋\n\n"
+            "لینک خبر گیمفا را ارسال کنید."
         )
 
+        return
+
+
+
+    url = get_url(text)
+
+
+    if not url:
+
+        return
+
+
+    if "gamefa.com" not in url:
+
+        await message.reply(
+            "❌ فقط لینک گیمفا قبول می‌شود."
+        )
+
+        return
+
+
+
+    wait = await message.reply(
+        "⏳ در حال پردازش خبر..."
+    )
+
+
+    try:
 
         soup = get_page(url)
 
@@ -278,20 +219,18 @@ async def on_message(message):
             soup
         )
 
-
         image = get_image(
             soup
         )
-
 
         paragraphs = get_paragraphs(
             soup
         )
 
 
-        if len(paragraphs)<2:
+        if len(paragraphs) < 2:
 
-            await message.reply(
+            await wait.edit(
                 "❌ دو پاراگراف پیدا نشد."
             )
 
@@ -299,7 +238,7 @@ async def on_message(message):
 
 
 
-        caption = make_caption(
+        caption = create_caption(
             title,
             paragraphs,
             url
@@ -321,18 +260,20 @@ async def on_message(message):
             )
 
 
-
-    except Exception as e:
-
-        logging.error(
-            e
+        await wait.edit(
+            "✅ آماده شد."
         )
 
 
+    except Exception as e:
 
-# -------------------------
-# اجرای اصلی
-# -------------------------
+        logging.exception(e)
+
+        await wait.edit(
+            f"❌ خطا:\n{e}"
+        )
+
+
 
 if __name__ == "__main__":
 
