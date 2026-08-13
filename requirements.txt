@@ -1,0 +1,4 @@
+aiohttp>=3.11,<4
+beautifulsoup4>=4.12,<5
+openai>=1.99,<3
+lxml>=5.3,<7
